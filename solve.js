@@ -6,11 +6,17 @@
 // but scans with indexOf and slices fields out, so the common case never
 // touches a character at a time:
 //
-//   - a line with no quote and no stray CR is split(',') in one go;
+//   - a line with no quote and no stray CR is cut into fields with an
+//     indexOf(',') loop, sliced straight from the text;
 //   - an unquoted field is found with indexOf(',') / indexOf('\n'), and a
 //     stray CR inside it is dropped exactly as the reference drops it;
 //   - a quoted field is found with indexOf('"'); doubled quotes and CR/LF
 //     inside quotes are handled exactly as the reference handles them.
+//
+// The hot paths are inlined in the record loop (no call, no shared result
+// object) and fall back to the shared readers for the rare cases: a stray
+// CR in an unquoted field, a doubled quote, a CR inside quotes, an
+// unterminated quote, or junk after a closing quote.
 //
 // Where the reference's behaviour is subtle, this code mirrors it line for
 // line (see the comments): a BOM is dropped, empty lines are no records, a

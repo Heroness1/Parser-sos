@@ -265,7 +265,15 @@ export function run(input) {
     if (lineStr.indexOf('"') === -1) {
       const rIdx = lineStr.indexOf('\r');
       if (rIdx === -1) {
-        const fields = lineStr.split(',');
+        // v2b trial: manual field loop over the line slice instead of split(',').
+        const fields = [];
+        let f = 0;
+        for (;;) {
+          const c = lineStr.indexOf(',', f);
+          if (c === -1) { fields.push(lineStr.slice(f)); break; }
+          fields.push(lineStr.slice(f, c));
+          f = c + 1;
+        }
         if (hasNL) {
           pos = end + 1;
           line++;
@@ -276,7 +284,15 @@ export function run(input) {
         continue;
       }
       if (hasNL && rIdx === lineStr.length - 1) {
-        const fields = lineStr.slice(0, -1).split(',');
+        const ls = lineStr.slice(0, -1);
+        const fields = [];
+        let f = 0;
+        for (;;) {
+          const c = ls.indexOf(',', f);
+          if (c === -1) { fields.push(ls.slice(f)); break; }
+          fields.push(ls.slice(f, c));
+          f = c + 1;
+        }
         pos = end + 1;
         line++;
         finalize(fields, false);
@@ -285,15 +301,97 @@ export function run(input) {
       // A stray CR inside the line: fall through to the slow path.
     }
 
-    // Slow path: field by field.
+    // Slow path: field by field. The unquoted case is inlined here (no
+    // call, no shared result object); a stray CR inside it falls back to
+    // readUnquoted, which handles the cleaning.
     const fields = [];
     let lastQuoted = false;
     let ended;
     do {
-      lastQuoted = text.charCodeAt(pos) === 34;
-      const f = lastQuoted ? readQuoted() : readUnquoted('');
-      fields.push(f.value);
-      ended = f.ended;
+      if (text.charCodeAt(pos) === 34) {
+        lastQuoted = true;
+        // Inline the common quoted field: one segment, no doubled quote,
+        // no CR inside, closed and followed by ',', a line break, or the
+        // end. Anything else (doubled quote, CR inside, unterminated,
+        // junk after the close) falls back to readQuoted with line and
+        // pos untouched.
+        const q = text.indexOf('"', pos + 1);
+        let handled = false;
+        if (q !== -1 && text.charCodeAt(q + 1) !== 34) {
+          const seg = text.slice(pos + 1, q);
+          if (seg.indexOf('\r') === -1) {
+            if (q + 1 >= len) {
+              line += countLF(seg);
+              pos = len;
+              fields.push(seg);
+              ended = END;
+              handled = true;
+            } else {
+              const c = text.charCodeAt(q + 1);
+              if (c === 44) {
+                line += countLF(seg);
+                pos = q + 2;
+                fields.push(seg);
+                ended = COMMA;
+                handled = true;
+              } else if (c === 10) {
+                line += countLF(seg);
+                pos = q + 2;
+                line++;
+                fields.push(seg);
+                ended = LINE_BREAK;
+                handled = true;
+              } else if (c === 13 && text.charCodeAt(q + 2) === 10) {
+                line += countLF(seg);
+                pos = q + 3;
+                line++;
+                fields.push(seg);
+                ended = LINE_BREAK;
+                handled = true;
+              }
+            }
+          }
+        }
+        if (!handled) {
+          const f = readQuoted();
+          fields.push(f.value);
+          ended = f.ended;
+        }
+      } else {
+        lastQuoted = false;
+        const iC = text.indexOf(',', pos);
+        const iN = text.indexOf('\n', pos);
+        let end;
+        if (iC === -1 && iN === -1) {
+          end = len;
+          ended = END;
+        } else if (iN === -1 || (iC !== -1 && iC < iN)) {
+          end = iC;
+          ended = COMMA;
+        } else {
+          end = iN;
+          ended = LINE_BREAK;
+        }
+        let piece = text.slice(pos, end);
+        if (ended === LINE_BREAK && piece.charCodeAt(piece.length - 1) === 13) {
+          piece = piece.slice(0, -1);
+        }
+        if (piece.indexOf('\r') !== -1) {
+          const f = readUnquoted('');
+          fields.push(f.value);
+          ended = f.ended;
+        } else {
+          if (ended === COMMA) {
+            pos = end + 1;
+          } else if (ended === LINE_BREAK) {
+            pos = end + 1;
+            line++;
+          } else {
+            pos = len;
+          }
+          fields.push(piece);
+        }
+      }
     } while (ended === COMMA);
     finalize(fields, lastQuoted);
   }
